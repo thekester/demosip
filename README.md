@@ -1,56 +1,58 @@
 # Demo SIP Show
 
-Ce dépôt contient `demo_sip_show.sh`, un script Bash qui orchestre une démonstration SIP/Asterisk complète dans un environnement LXD. Il prépare automatiquement une instance Asterisk, configure des comptes SIP, ouvre des terminaux d'observation et pilote des clients PJSUA pour illustrer un scénario de centre d'appels (mode guidé puis mode "hacker").
+This repository ships `demo_sip_show.sh`, a Bash script that drives a complete SIP/Asterisk demonstration inside an LXD environment. It prepares an Asterisk PBX, configures SIP peers, launches monitoring terminals, and pilots PJSUA clients to showcase a guided call-center scenario followed by a bursty "hacker" mode.
 
-## Fonctionnalités clés
+![Demo walkthrough](sipdemoenglish.gif)
 
-- **Préparation automatique du PBX** : sauvegarde des fichiers `sip.conf`/`extensions.conf`, création de dialplan temporel, génération des extensions et rechargement d'Asterisk.
-- **Gestion audio immersive** : conversion automatique de sons (`.mp3` -> `.wav`), affectation de rôles (sonnerie, connexion, raccrochage) et mise en scène synchronisée côté conteneur et côté hôte.
-- **Dashboard temps réel** : affiche l'état du scénario, les appels actifs (`core show channels`), les pairs SIP, et décrit chaque étape (origine, destination, sons utilisés, durée prévue).
-- **Scénario piloté + mode rafale** : le script exécute un scénario déterministe (service horaire, appels croisés) puis des rafales configurables pour simuler des attaques ou du stress trafic.
-- **Nettoyage intelligent** : arrêt des sessions PJSUA/Asterisk existantes, purge des fichiers de boucle, préparation des logs et fenêtres terminal.
+## Key Features
 
-## Prérequis
+- **PBX bootstrap** – backs up `sip.conf` and `extensions.conf`, injects a temporary dialplan, provisions extensions, then reloads Asterisk.
+- **Audio staging** – converts demo sounds from `.mp3` to `.wav`, assigns ring/connect/hangup roles, and synchronizes playback on host and containers.
+- **Real-time dashboard** – tracks scenario progress, lists active channels (`core show channels`), SIP peers, and narrates each step (origin, destination, audio role, expected duration).
+- **Guided scenario + stress mode** – runs a deterministic story (time service and cross-calls) and optionally fires configurable bursts to simulate attacks or high traffic.
+- **Smart cleanup** – tears down lingering PJSUA/Asterisk sessions, clears loop state files, and reopens all terminal panes.
 
-- Hôte Linux avec **LXD/LXC** et des conteneurs nommés (`asterisk01`, `ua01`, `ua02` par défaut).
-- Clients **PJSUA** installés dans les conteneurs UA.
-- `ffmpeg`, `aplay`, `gnome-terminal` ou `xterm` disponibles sur l'hôte.
-- Accès aux sons (`sound/*.wav`) qui accompagnent la démo.
+## Prerequisites
 
-## Variables utiles
+- Linux host with **LXD/LXC** and containers named `asterisk01`, `ua01`, `ua02` (defaults; override via env vars if needed).
+- **PJSUA** clients installed inside user-agent containers.
+- `ffmpeg`, `aplay`, and either `gnome-terminal` or `xterm` available on the host.
+- Demo audio files stored in `sound/*.wav`.
 
-Toutes les variables possèdent des valeurs par défaut mais peuvent être redéfinies à l'exécution :
+## Tunable Variables
+
+All variables ship with safe defaults and can be overridden at run time:
 
 - `AST_CT`, `UAS`, `UA_PORTS`, `AST_EXT_BASE`, `AST_SVC_TIME`
 - `SOUND_DIR`, `RING_SOUND`, `CONNECT_SOUND`, `HANG_SOUND`
 - `SOUND_MIN_CALL_DURATION`, `SOUND_GUIDE_PAUSE`, `SOUND_BURST_PAUSE`, `SOUND_PLAYBACK_DELAY`, `SOUND_HANG_DELAY`
 - `HACKER_MODE`, `LOOP_COUNT`, `CALL_BURST`, `BURST_INTERVAL_MS`
 
-## Utilisation
+## Usage
 
 ```bash
 ./demo_sip_show.sh
 ```
 
-Le script :
-1. Vérifie la présence de lxc/pjsua et des terminaux graphiques.
-2. Nettoie l'environnement précédent.
-3. Prépare le PBX Asterisk et les fichiers audio.
-4. Ouvre les terminaux (dashboard, logs, peers, Asterisk, UAs).
-5. Exécute le scénario guidé puis, si activé, les rafales.
+What happens:
+1. Required binaries (LXC/PJSUA/terminals) are detected.
+2. Previous demo artefacts are cleaned up.
+3. The Asterisk PBX and audio assets are staged.
+4. Monitoring terminals (dashboard, logs, peers, Asterisk shells, UAs) are opened.
+5. The guided scenario runs, followed by burst mode if enabled.
 
-## Personnalisation des sons
+## Customising Audio
 
-Déposez vos fichiers `.mp3` dans `sound/` ; le script les convertit en `.wav` et les répartit entre les rôles. Vous pouvez aussi fournir directement vos WAV via les variables d'environnement.
+Drop `.mp3` files into `sound/`; the script converts them into `.wav` files and assigns them to roles. You can also point `RING_SOUND`, `CONNECT_SOUND`, and `HANG_SOUND` directly to existing WAV files.
 
-## Journalisation
+## Logging
 
-Tous les appels PJSUA sont journalisés dans `~/sip-tests` (modifiable via `LOG_DIR`). Le dashboard suit l'état courant dans `~/.sipdemo_current_step` et les rafales dans `~/.sipdemo_loop_state`.
+PJSUA call logs are written to `~/sip-tests` (configurable via `LOG_DIR`). Scenario progress is mirrored to `~/.sipdemo_current_step`, and burst state is tracked in `~/.sipdemo_loop_state`.
 
-## Dépannage rapide
+## Quick Troubleshooting
 
-- **"variable sans liaison"** : exécutez le script depuis Bash (le shebang relance en Bash si nécessaire) et vérifiez les sons/variables.
-- **Pas de son** : assurez-vous que `aplay` est installé et que les WAV sont lisibles.
-- **Fichiers Asterisk non modifiés** : vérifier que le conteneur `AST_CT` existe et que les permissions permettent la copie/push des fichiers.
+- **"unbound variable"** – run the script through Bash (the shebang already enforces Bash) and double-check audio variable overrides.
+- **No audio playback** – confirm `aplay` is installed and sounds are readable.
+- **Asterisk files unchanged** – ensure the `AST_CT` container exists and your user has permission to push files into it.
 
-Bonnes démos !
+Happy demos!
