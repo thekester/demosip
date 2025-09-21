@@ -25,6 +25,8 @@ AST_EXT_BASE="${AST_EXT_BASE:-1001}"
 AST_SVC_TIME="${AST_SVC_TIME:-600}"
 LOG_DIR="${LOG_DIR:-$HOME/sip-tests}"
 COUNTDOWN="${COUNTDOWN:-3}"
+BUSY_DIR="${BUSY_DIR:-$HOME/.sipdemo_busy}"
+BUSY_TIMEOUT="${BUSY_TIMEOUT:-8}"
 
 # ---------------- Deterministic scenario -------------
 # Keep calls long enough so the dashboard always sees active channels
@@ -35,8 +37,8 @@ SCENARIO=(
   "ua01 1002 15"     # ua01 -> ua02
 )
 
-# ---------------- Talkative hacker mode --------------
-HACKER_MODE="${HACKER_MODE:-on}"
+# ---------------- Stress burst mode ------------------
+BURST_MODE="${BURST_MODE:-on}"
 LOOP_COUNT="${LOOP_COUNT:-999}"        # near-continuous bursts by default
 CALL_BURST="${CALL_BURST:-5}"
 BURST_INTERVAL_MS="${BURST_INTERVAL_MS:-400}"
@@ -69,6 +71,46 @@ warn(){ printf "${C3}[WARN]${CR} %s\n" "$*"; }
 need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 ms_to_s(){ awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000.0}'; }
 rand_between(){ awk -v min="$1" -v max="$2" 'BEGIN{srand(); printf("%d", min+int(rand()*(max-min+1)))}'; }
+
+ua_busy_file(){ printf '%s/%s.busy' "$BUSY_DIR" "$1"; }
+is_ua_busy(){
+  local ua="$1" path="$(ua_busy_file "$ua")"
+  [[ -f "$path" ]]
+}
+wait_for_free_ua(){
+  local ua="$1" waited=0 path="$(ua_busy_file "$ua")"
+  mkdir -p "$BUSY_DIR"
+
+  if [[ -f "$path" ]]; then
+    local now="$(date +%s)" mtime age
+    if mtime=$(stat -c %Y "$path" 2>/dev/null); then
+      :
+    elif mtime=$(stat -f %m "$path" 2>/dev/null); then
+      :
+    else
+      mtime="$now"
+    fi
+    age=$(( now - mtime ))
+    if (( age > BUSY_TIMEOUT )); then
+      warn "$ua busy marker stale (${age}s); clearing it"
+      rm -f "$path" || true
+    fi
+  fi
+
+  while [[ -f "$path" ]]; do
+    (( waited == 0 )) && info "Waiting for $ua to release its SIP port..."
+    sleep 1
+    waited=$((waited+1))
+    if (( waited % 2 == 0 )); then
+      info "$ua still busy (${waited}s elapsed)"
+    fi
+    if (( waited >= BUSY_TIMEOUT )); then
+      warn "$ua still busy after ${waited}s; forcing reset"
+      rm -f "$path" || true
+      break
+    fi
+  done
+}
 
 # ---------------- Window placement -------------------
 # format COLSxROWS+X+Y - adjust to your screen layout
@@ -126,6 +168,7 @@ hard_reset_environment() {
   pkill -f "lxc exec $AST_CT -- bash -lc asterisk -rvvvvv" 2>/dev/null || true
   for ua in "${UAS[@]}"; do lxc exec "$ua" -- bash -lc "pkill -f pjsua || true" 2>/dev/null || true; done
   rm -f "$STOP_FILE" 2>/dev/null || true
+  mkdir -p "$BUSY_DIR" && rm -f "$BUSY_DIR"/*.busy 2>/dev/null || true
   ok "Cleanup done"
 }
 
@@ -444,8 +487,8 @@ describe_burst_call() {
 dashboard_script_body() {
   # Emit the body of the dashboard helper script executed in a terminal.
   local header
-  header=$(printf 'AST_CT=%q\nAST_IP=%q\nLOG_DIR=%q\nHACKER_MODE=%q\nSTOP_FILE=%q\nUAS_DISPLAY=%q\n' \
-    "$AST_CT" "$AST_IP" "$LOG_DIR" "$HACKER_MODE" "$STOP_FILE" "${UAS[*]}")
+  header=$(printf 'AST_CT=%q\nAST_IP=%q\nLOG_DIR=%q\nBURST_MODE=%q\nSTOP_FILE=%q\nUAS_DISPLAY=%q\n' \
+    "$AST_CT" "$AST_IP" "$LOG_DIR" "$BURST_MODE" "$STOP_FILE" "${UAS[*]}")
   printf '%s\n' "$header"
   cat <<'EOS'
 phone_icon() {
@@ -475,7 +518,7 @@ while true; do
   echo -e "\033[1;32mPBX:\033[0m ${AST_IP}"
   echo -e "\033[1;32mUAs:\033[0m ${UAS_DISPLAY}"
   echo -e "\033[1;32mLogs:\033[0m ${LOG_DIR}"
-  echo -e "\033[1;33mHacker mode:\033[0m ${HACKER_MODE}   \033[1;33mStop file:\033[0m ${STOP_FILE}"
+  echo -e "\033[1;33mBurst mode:\033[0m ${BURST_MODE}   \033[1;33mStop file:\033[0m ${STOP_FILE}"
   echo
   echo -e "\033[1;36mWhat you see:\033[0m signaling, active channels, guided scenario, then controlled bursts."
   echo
@@ -498,7 +541,7 @@ while true; do
   fi
 
   if [[ -s "$loop_file" ]]; then
-    echo -e "\n\033[1;36m--- Hacker mode ---\033[0m"
+    echo -e "\n\033[1;36m--- Burst mode ---\033[0m"
     tail -n 5 "$loop_file"
   fi
 
@@ -618,6 +661,8 @@ EOS
     fi
     port="${UA_PORTS[$ua_idx]}"
 
+    wait_for_free_ua "$ua"
+
     local media_override=""
     media_override=$(select_call_media "$ua" "$target")
     cmd_payload=$(pjsua_cmd "$ua" "$port" "$target" "$dur" "$media_override")
@@ -639,6 +684,8 @@ EOS
       sleep "$SOUND_PLAYBACK_DELAY"
     fi
 
+    local busy_file="$(ua_busy_file "$ua")"
+
     call_body=$(
       {
         printf 'UA=%q\nTARGET=%q\nLOG_DIR=%q\n' "$ua" "$target" "$LOG_DIR"
@@ -646,8 +693,12 @@ EOS
         printf 'HANG_SOUND=%q\n' "$HANG_SOUND"
         printf 'HOST_CAN_PLAY=%q\n' "$host_can_play"
         printf 'SOUND_HANG_DELAY=%q\n' "$SOUND_HANG_DELAY"
+        printf 'BUSY_FILE=%q\n' "$busy_file"
         cat <<'EOS'
 ts=$(date +%Y%m%d_%H%M%S)
+mkdir -p "$(dirname "$BUSY_FILE")"
+printf '%s %s\n' "$$" "$(date +%s)" > "$BUSY_FILE"
+trap 'rm -f "$BUSY_FILE"' EXIT
 lxc exec "$UA" -- bash -lc "$cmd" | tee "$LOG_DIR/${UA}_${ts}_to_${TARGET}.log"
 if [[ "$HOST_CAN_PLAY" == yes && -n "$HANG_SOUND" && -r "$HANG_SOUND" ]]; then
   aplay "$HANG_SOUND" >/dev/null 2>&1 || true
@@ -660,10 +711,10 @@ EOS
     sleep "$spacing_det"
   done
 
-  if [[ "$HACKER_MODE" == "on" ]]; then
+  if [[ "$BURST_MODE" == "on" ]]; then
     # Optional burst mode to stress the PBX with randomized call storms.
     local loop_file="$HOME/.sipdemo_loop_state"; : > "$loop_file"
-    echo "Hacker mode: $LOOP_COUNT waves x $CALL_BURST calls" >> "$loop_file"
+    echo "Burst mode: $LOOP_COUNT waves x $CALL_BURST calls" >> "$loop_file"
     echo "Stop file: $STOP_FILE" >> "$loop_file"
 
     local wave
@@ -691,6 +742,8 @@ EOS
         fi
         port="${UA_PORTS[$src_idx]}"
 
+        wait_for_free_ua "$src"
+
         echo "burst: $src -> $dst (${dur}s)" >> "$loop_file"
 
         local media_override=""
@@ -713,6 +766,8 @@ EOS
           aplay "$host_sound" >/dev/null 2>&1 || true
           sleep "$SOUND_PLAYBACK_DELAY"
         fi
+        local busy_file="$(ua_busy_file "$src")"
+
         burst_body=$(
           {
             printf 'UA=%q\nTARGET=%q\nLOG_DIR=%q\n' "$src" "$dst" "$LOG_DIR"
@@ -720,8 +775,12 @@ EOS
             printf 'HANG_SOUND=%q\n' "$HANG_SOUND"
             printf 'HOST_CAN_PLAY=%q\n' "$host_can_play"
             printf 'SOUND_HANG_DELAY=%q\n' "$SOUND_HANG_DELAY"
+            printf 'BUSY_FILE=%q\n' "$busy_file"
             cat <<'EOS'
 ts=$(date +%Y%m%d_%H%M%S)
+mkdir -p "$(dirname "$BUSY_FILE")"
+printf '%s %s\n' "$$" "$(date +%s)" > "$BUSY_FILE"
+trap 'rm -f "$BUSY_FILE"' EXIT
 lxc exec "$UA" -- bash -lc "$cmd" | tee "$LOG_DIR/${UA}_${ts}_burst_to_${TARGET}.log"
 if [[ "$HOST_CAN_PLAY" == yes && -n "$HANG_SOUND" && -r "$HANG_SOUND" ]]; then
   aplay "$HANG_SOUND" >/dev/null 2>&1 || true
@@ -737,7 +796,7 @@ EOS
       [[ -f "$STOP_FILE" ]] && break
       sleep "$LOOP_SLEEP"
     done
-    echo "Hacker mode complete" >> "$loop_file"
+    echo "Burst mode complete" >> "$loop_file"
   fi
 
   echo "Demo finished. Call windows close automatically. Dashboard and log panes stay open."
