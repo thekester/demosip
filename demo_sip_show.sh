@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# Auto-relance en bash si lancé via sh/dash
+# Relaunch under Bash when invoked through sh/dash
 if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOUND_DIR="${SOUND_DIR:-$SCRIPT_DIR/sound}"
-RING_SOUND="${RING_SOUND:-$SOUND_DIR/telephoenquisonneindiquantunappelentrant.wav}"
-CONNECT_SOUND="${CONNECT_SOUND:-$SOUND_DIR/Sondeconnexionindiquantqueappelaeteprispuisbipcourt.wav}"
-HANG_SOUND="${HANG_SOUND:-$SOUND_DIR/sonderaccrochageorsqueappelanterminappelclicdoux.wav}"
+RING_SOUND="${RING_SOUND:-$SOUND_DIR/incoming_call_ringtone.wav}"
+CONNECT_SOUND="${CONNECT_SOUND:-$SOUND_DIR/call_connected_tone.wav}"
+HANG_SOUND="${HANG_SOUND:-$SOUND_DIR/call_hangup_click.wav}"
 SOUND_MIN_CALL_DURATION="${SOUND_MIN_CALL_DURATION:-10}"
 SOUND_GUIDE_PAUSE="${SOUND_GUIDE_PAUSE:-3.5}"
 SOUND_BURST_PAUSE="${SOUND_BURST_PAUSE:-2.5}"
 SOUND_HANG_DELAY="${SOUND_HANG_DELAY:-1.5}"
 SOUND_PLAYBACK_DELAY="${SOUND_PLAYBACK_DELAY:-0.6}"
 
-# demo_sip_show.sh - SIP demo Asterisk + pjsua - mode hacker et effet démo renforcé
+# demo_sip_show.sh - SIP demo with Asterisk + pjsua - hacker mode plus demo effects
+# High-level driver that showcases a SIP call flow across LXD containers.
 
-# ---------------- Paramètres généraux ----------------
+# ---------------- General parameters ----------------
 AST_CT="${AST_CT:-asterisk01}"
 UAS=( ${UAS:-ua01 ua02} )
 UA_PORTS=( ${UA_PORTS:-5061 5062} )
@@ -25,18 +26,18 @@ AST_SVC_TIME="${AST_SVC_TIME:-600}"
 LOG_DIR="${LOG_DIR:-$HOME/sip-tests}"
 COUNTDOWN="${COUNTDOWN:-3}"
 
-# ---------------- Scénario déterministe -------------
-# appels plus longs pour que le dashboard voie toujours des canaux actifs
+# ---------------- Deterministic scenario -------------
+# Keep calls long enough so the dashboard always sees active channels
 DURATION_DEFAULT="${DURATION_DEFAULT:-15}"
 SCENARIO=(
-  "ua01 600 15"      # ua01 -> service horaire
+  "ua01 600 15"      # ua01 -> time service
   "ua02 1001 15"     # ua02 -> ua01
   "ua01 1002 15"     # ua01 -> ua02
 )
 
-# ---------------- Hacker mode bavard ----------------
+# ---------------- Talkative hacker mode --------------
 HACKER_MODE="${HACKER_MODE:-on}"
-LOOP_COUNT="${LOOP_COUNT:-999}"        # rafales quasi continues
+LOOP_COUNT="${LOOP_COUNT:-999}"        # near-continuous bursts by default
 CALL_BURST="${CALL_BURST:-5}"
 BURST_INTERVAL_MS="${BURST_INTERVAL_MS:-400}"
 LOOP_SLEEP="${LOOP_SLEEP:-2}"
@@ -45,22 +46,22 @@ RAND_DUR_MAX="${RAND_DUR_MAX:-14}"
 STOP_FILE="${STOP_FILE:-$HOME/.sipdemo_stop}"
 
 # ---------------- Audio - download + staging --------
-# Nous essayons d’abord ces URL, sinon nous tombons sur /usr/share/sounds/alsa.
-# Tu peux fournir tes propres URL avec WAV_URLS="url1 url2 ..."
+# Try these URLs first; otherwise fall back to /usr/share/sounds/alsa.
+# Provide your own list via WAV_URLS="url1 url2 ..."
 WAV_URLS="${WAV_URLS:-\
 https://cdn.freesound.org/previews/341/341695_5858296-lq.mp3 \
 https://cdn.freesound.org/previews/476/476178_10095718-lq.mp3 \
 https://file-examples.com/storage/fe2d0d1/2017/11/file_example_WAV_1MG.wav}"
 
-# Remarque: si ce sont des .mp3, pjsua ne les jouera pas. Nous tenterons de récupérer aussi des .wav locaux.
+# Note: pjsua cannot play .mp3 files, so we also look for local .wav assets.
 WAV_SEARCH_DIRS=( "$HOME" "$HOME/Music" "/usr/share/sounds/alsa" "/usr/share/sounds" )
 
-declare -A PLAY_FILES     # chemin hôte attribué à chaque UA
-declare -A UA_PLAY_FILES  # chemin dans le conteneur (poussé sous /tmp)
-declare -A ROLE_WAVS      # sons par rôle (ring, connect, hang)
-declare -A UA_ROLE_FILES  # chemins conteneur par UA/role
+declare -A PLAY_FILES     # host-side path assigned to each UA
+declare -A UA_PLAY_FILES  # path inside the container (pushed under /tmp)
+declare -A ROLE_WAVS      # audio per role (ring, connect, hang)
+declare -A UA_ROLE_FILES  # container path keyed by UA/role
 
-# ---------------- Couleurs + utils ------------------
+# ---------------- Colors + utilities ------------------
 C1=$'\033[1;36m'; C2=$'\033[1;32m'; C3=$'\033[1;33m'; CR=$'\033[0m'
 ok(){   printf "${C2}[OK]${CR} %s\n"   "$*"; }
 info(){ printf "${C1}[INFO]${CR} %s\n" "$*"; }
@@ -69,17 +70,18 @@ need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 ms_to_s(){ awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000.0}'; }
 rand_between(){ awk -v min="$1" -v max="$2" 'BEGIN{srand(); printf("%d", min+int(rand()*(max-min+1)))}'; }
 
-# ---------------- Placement des fenêtres ------------
-# format COLSxROWS+X+Y - ajuste selon ta résolution
-GEOM_DASH="${GEOM_DASH:-120x30+420+80}"     # dashboard centré
-GEOM_LOGS="${GEOM_LOGS:-120x14+420+560}"    # logs sous dashboard
-GEOM_ASTK="${GEOM_ASTK:-84x24+40+120}"      # asterisk à gauche
-GEOM_PEER="${GEOM_PEER:-84x24+1300+120}"    # peers à droite
-GEOM_UA1="${GEOM_UA1:-90x18+60+600}"        # UA1 bas gauche
-GEOM_UA2="${GEOM_UA2:-90x18+1220+600}"      # UA2 bas droit
+# ---------------- Window placement -------------------
+# format COLSxROWS+X+Y - adjust to your screen layout
+GEOM_DASH="${GEOM_DASH:-120x30+420+80}"     # dashboard centered
+GEOM_LOGS="${GEOM_LOGS:-120x14+420+560}"    # logs below dashboard
+GEOM_ASTK="${GEOM_ASTK:-84x24+40+120}"      # asterisk on the left
+GEOM_PEER="${GEOM_PEER:-84x24+1300+120}"    # peers on the right
+GEOM_UA1="${GEOM_UA1:-90x18+60+600}"        # UA1 lower left
+GEOM_UA2="${GEOM_UA2:-90x18+1220+600}"      # UA2 lower right
 
 open_term() {
-  # $1 title, $2 script body, $3 geometry (optionnel), $4 hold=yes|no
+  # $1 title, $2 script body, $3 geometry (optional), $4 hold=yes|no
+  # Launch a disposable helper script inside a graphical terminal window.
   local title="$1" body="$2" geo="${3:-}" hold="${4:-yes}"
   local script
   script=$(mktemp -p "${TMPDIR:-/tmp}" sipdemo_term_XXXXXX.sh)
@@ -89,7 +91,7 @@ open_term() {
     printf 'trap '\''rm -f "$0"'\'' EXIT\n'
     printf '%s\n' "$body"
     if [[ "$hold" == "yes" ]]; then
-      printf '\necho\nread -rp "Appuyez sur Entrée pour fermer..." _\n'
+      printf '\necho\nread -rp "Press Enter to close..." _\n'
     fi
   } >"$script"
   chmod +x "$script"
@@ -99,37 +101,39 @@ open_term() {
   elif need_cmd xterm; then
     xterm ${geo:+-geometry "$geo"} -T "$title" -e bash "$script" &
   else
-    echo "Aucun terminal compatible (gnome-terminal ou xterm) n’est disponible." >&2
+    echo "No compatible terminal (gnome-terminal or xterm) is available." >&2
     rm -f "$script"
     return 1
   fi
 }
 
-# ---------------- Vérifs de base --------------------
+# ---------------- Basic sanity checks ----------------
 check_prereqs(){
-  need_cmd lxc || { echo "lxc manquant"; exit 1; }
-  # Au moins un terminal moderne
+  need_cmd lxc || { echo "missing lxc binary"; exit 1; }
+  # Require at least one graphical terminal capable of holding dashboards.
   if ! need_cmd gnome-terminal && ! need_cmd xterm; then
-    echo "Installe gnome-terminal ou xterm pour l’affichage multi fenêtres."
+    echo "Install gnome-terminal or xterm to enable the multi-window view."
     exit 1
   fi
 }
 
-# ---------------- Nettoyage / PBX -------------------
+# ---------------- Cleanup / PBX -------------------
 hard_reset_environment() {
-  info "Nettoyage des sessions précédentes"
+  # Stop lingering demo processes so we start from a clean slate.
+  info "Cleaning up previous sessions"
   pkill -f "asterisk -rx sip show peers" 2>/dev/null || true
   pkill -f "tail -F $LOG_DIR"            2>/dev/null || true
   pkill -f "lxc exec $AST_CT -- bash -lc asterisk -rvvvvv" 2>/dev/null || true
   for ua in "${UAS[@]}"; do lxc exec "$ua" -- bash -lc "pkill -f pjsua || true" 2>/dev/null || true; done
   rm -f "$STOP_FILE" 2>/dev/null || true
-  ok "Nettoyage effectue"
+  ok "Cleanup done"
 }
 
 prepare_pbx() {
   local dollar='$'
+  # Derive PBX address, preserve stock configs, and inject our demo dialplan.
   AST_IP="$(lxc list "$AST_CT" -c4 --format=csv | sed 's/ .*//')"
-  [[ -n "$AST_IP" ]] || { echo "IP Asterisk introuvable"; exit 1; }
+  [[ -n "$AST_IP" ]] || { echo "Unable to determine Asterisk IP"; exit 1; }
   mkdir -p "$LOG_DIR"
   lxc exec "$AST_CT" -- bash -lc '
     set -e
@@ -175,27 +179,29 @@ EOF
     "
   done
   lxc exec "$AST_CT" -- bash -lc "asterisk -rx 'sip reload' >/dev/null; asterisk -rx 'dialplan reload' >/dev/null; asterisk -rx 'core set verbose 3' >/dev/null || true"
-  ok "PBX pret a l adresse $AST_IP"
+  ok "PBX ready at $AST_IP"
 }
 
 # ---------------- Audio: download + scan ------------
 maybe_download_wavs() {
+  # Opportunistically download example WAV files when none are staged yet.
   local outdir="$LOG_DIR/wavs"; mkdir -p "$outdir"
   if (( $(ls -1 "$outdir"/*.wav 2>/dev/null | wc -l) >= 2 )); then return 0; fi
   local fetch=""
   if need_cmd curl; then fetch="curl -L --fail --max-time 10 -o"
   elif need_cmd wget; then fetch="wget -T 10 -O"
   else return 0; fi
-  info "Tentative de telechargement de sons de telephone (optionnel)..."
+  info "Attempting to download sample phone sounds (optional)..."
   local i=0
   for url in $WAV_URLS; do
     i=$((i+1)); dst="$outdir/sample_$i"
-    # essayons .wav direct
+    # try direct .wav downloads first
     $fetch "${dst}.wav" "$url" 2>/dev/null || true
   done
 }
 
 collect_local_wavs() {
+  # Locate WAV assets across user directories plus the optional download cache.
   maybe_download_wavs
   local found=()
   for d in "${WAV_SEARCH_DIRS[@]}" "$LOG_DIR/wavs"; do
@@ -208,6 +214,7 @@ collect_local_wavs() {
 }
 
 assign_wavs() {
+  # Build a mapping between each UA and the audio file it should play.
   local list=( $(collect_local_wavs) )
   local total="${#list[@]}"
   for i in "${!UAS[@]}"; do
@@ -218,20 +225,23 @@ assign_wavs() {
     elif (( total > 0 )); then
       PLAY_FILES["$ua"]="${list[$((i%total))]}"
     else
-      PLAY_FILES["$ua"]=""  # pas de play-file
+      PLAY_FILES["$ua"]=""  # no playback file
     fi
 
     if (( i == 0 )) && [[ -r "$CONNECT_SOUND" ]]; then
+      # Force the first agent to play the connection prompt so the story is consistent.
       PLAY_FILES["$ua"]="$CONNECT_SOUND"
     elif (( i == 1 )) && [[ -r "$RING_SOUND" ]]; then
+      # Second agent is biased toward ringing audio to simulate an inbound call.
       PLAY_FILES["$ua"]="$RING_SOUND"
     fi
 
-    info "Audio hote $ua -> ${PLAY_FILES[$ua]:-(aucun)}"
+    info "Host audio $ua -> ${PLAY_FILES[$ua]:-(none)}"
   done
 }
 
 init_role_wavs() {
+  # Remember which host-side WAV implements each logical role.
   ROLE_WAVS=()
   [[ -r "$RING_SOUND"    ]] && ROLE_WAVS[ring]="$RING_SOUND"
   [[ -r "$CONNECT_SOUND" ]] && ROLE_WAVS[connect]="$CONNECT_SOUND"
@@ -239,6 +249,7 @@ init_role_wavs() {
 }
 
 stage_wavs_into_uas() {
+  # Push host WAV files into each LXD container so pjsua can access them locally.
   UA_ROLE_FILES=()
   for ua in "${UAS[@]}"; do
     host_wav="${PLAY_FILES[$ua]:-}"
@@ -246,7 +257,7 @@ stage_wavs_into_uas() {
       tmp="/tmp/demo_audio_${ua}.wav"
       lxc file push "$host_wav" "$ua$tmp" >/dev/null 2>&1 || true
       UA_PLAY_FILES["$ua"]="$tmp"
-      info "Audio stage pour $ua -> $tmp"
+      info "Staged audio for $ua -> $tmp"
     else
       UA_PLAY_FILES["$ua"]=""
     fi
@@ -263,6 +274,7 @@ stage_wavs_into_uas() {
 
 # ---------------- pjsua builder ---------------------
 pjsua_cmd() {
+  # Compose the pjsua command for one call, with optional per-call media override.
   local ua="$1" port="$2" target="$3" dur="$4" override_play="${5:-}"
   local play="${override_play:-${UA_PLAY_FILES[$ua]:-}}" rec="/tmp/${ua}_$(date +%H%M%S).wav"
   local play_opt=""; [[ -n "$play" ]] && play_opt="--play-file='$play'"
@@ -278,6 +290,7 @@ EOF
 }
 
 select_call_media() {
+  # Decide which audio role should be played for a given UA/target pair.
   local ua="$1" target="$2"
 
   if [[ -n "${UA_ROLE_FILES[$ua:connect]:-}" && "$target" == "$AST_SVC_TIME" ]]; then
@@ -297,6 +310,7 @@ select_call_media() {
 }
 
 host_sound_for_target() {
+  # Work out which WAV should be played on the host side for this destination.
   local target="$1"
   if [[ "$target" == "$AST_SVC_TIME" && -r "$CONNECT_SOUND" ]]; then
     echo "$CONNECT_SOUND"
@@ -313,6 +327,7 @@ host_sound_for_target() {
 }
 
 target_to_ua() {
+  # Translate an extension back to the UA identifier it belongs to.
   local target="$1"
   for i in "${!UAS[@]}"; do
     local ext=$(( AST_EXT_BASE + i ))
@@ -325,69 +340,72 @@ target_to_ua() {
 }
 
 host_sound_label() {
+  # Provide a human-friendly label for the host playback state.
   local path="$1" can_play="$2"
-  local base="aucun"
+  local base="none"
   if [[ -z "$path" ]]; then
-    base="aucun"
+    base="none"
   elif [[ "$path" == "$CONNECT_SOUND" ]]; then
-    base="connexion"
+    base="connect tone"
   elif [[ "$path" == "$RING_SOUND" ]]; then
-    base="sonnerie"
+    base="ring tone"
   elif [[ "$path" == "$HANG_SOUND" ]]; then
-    base="raccrochage"
+    base="hangup click"
   else
-    base="personnalise"
+    base="custom"
   fi
   if [[ -z "$path" ]]; then
     echo "$base"
   elif [[ "$can_play" == "yes" ]]; then
-    echo "$base (lecture locale)"
+    echo "$base (host playback)"
   else
-    echo "$base (inactive hote)"
+    echo "$base (host muted)"
   fi
 }
 
 remote_sound_label() {
+  # Convert container-side audio paths into role names for the dashboard.
   local ua="$1" audio="$2"
-  [[ -n "$audio" ]] || { echo "aucun"; return; }
+  [[ -n "$audio" ]] || { echo "none"; return; }
   if [[ "${UA_ROLE_FILES[$ua:connect]:-}" == "$audio" ]]; then
-    echo "connexion"
+    echo "connect tone"
     return
   fi
   if [[ "${UA_ROLE_FILES[$ua:ring]:-}" == "$audio" ]]; then
-    echo "sonnerie"
+    echo "ring tone"
     return
   fi
   if [[ "${PLAY_FILES[$ua]:-}" == "$CONNECT_SOUND" ]]; then
-    echo "connexion"
+    echo "connect tone"
     return
   fi
   if [[ "${PLAY_FILES[$ua]:-}" == "$RING_SOUND" ]]; then
-    echo "sonnerie"
+    echo "ring tone"
     return
   fi
-  echo "personnalise"
+  echo "custom"
 }
 
 describe_call_step() {
+  # Produce a textual summary for the guided scenario dashboard section.
   local idx="$1" total="$2" ua="$3" target="$4" dur="$5" remote_audio="$6" host_audio="$7" can_play="$8"
   local remote_label host_label dest summary
   remote_label=$(remote_sound_label "$ua" "$remote_audio")
   host_label=$(host_sound_label "$host_audio" "$can_play")
   if [[ "$target" == "$AST_SVC_TIME" ]]; then
-    summary="Appel vers service horaire ($AST_SVC_TIME)"
+    summary="Call to time service ($AST_SVC_TIME)"
   else
     dest=$(target_to_ua "$target")
     if [[ -n "$dest" ]]; then
-      summary="Appel entrant pour $dest (ext $target)"
+      summary="Inbound call for $dest (ext $target)"
     else
-      summary="Appel vers $target"
+      summary="Call to $target"
     fi
   fi
-  printf 'Etape %s/%s : %s\n' "$idx" "$total" "$summary"
-  printf '  Origine : %s\n' "$ua"
+  printf 'Step %s/%s : %s\n' "$idx" "$total" "$summary"
+  printf '  Source      : %s\n' "$ua"
   if [[ "$target" == "$AST_SVC_TIME" ]]; then
-    printf '  Destination : Service horaire (%s)\n' "$AST_SVC_TIME"
+    printf '  Destination : Time service (%s)\n' "$AST_SVC_TIME"
   else
     dest=$(target_to_ua "$target")
     if [[ -n "$dest" ]]; then
@@ -396,33 +414,35 @@ describe_call_step() {
       printf '  Destination : %s\n' "$target"
     fi
   fi
-  printf '  Son cote UA  : %s\n' "$remote_label"
-  printf '  Son cote hote: %s\n' "$host_label"
-  printf '  Duree prevue : %ss\n' "$dur"
+  printf '  UA audio     : %s\n' "$remote_label"
+  printf '  Host audio   : %s\n' "$host_label"
+  printf '  Planned dura : %ss\n' "$dur"
 }
 
 describe_burst_call() {
+  # Same as describe_call_step but tailored for the burst loop.
   local wave="$1" waves_total="$2" call_idx="$3" call_total="$4" ua="$5" target="$6" dur="$7" remote_audio="$8" host_audio="$9" can_play="${10}"
   local dest remote_label host_label
   remote_label=$(remote_sound_label "$ua" "$remote_audio")
   host_label=$(host_sound_label "$host_audio" "$can_play")
   dest=$(target_to_ua "$target")
-  printf 'Rafale %s/%s – appel %s/%s\n' "$wave" "$waves_total" "$call_idx" "$call_total"
-  printf '  Origine : %s\n' "$ua"
+  printf 'Burst %s/%s - call %s/%s\n' "$wave" "$waves_total" "$call_idx" "$call_total"
+  printf '  Source      : %s\n' "$ua"
   if [[ "$target" == "$AST_SVC_TIME" ]]; then
-    printf '  Destination : Service horaire (%s)\n' "$AST_SVC_TIME"
+    printf '  Destination : Time service (%s)\n' "$AST_SVC_TIME"
   elif [[ -n "$dest" ]]; then
     printf '  Destination : %s (ext %s)\n' "$dest" "$target"
   else
     printf '  Destination : %s\n' "$target"
   fi
-  printf '  Son cote UA  : %s\n' "$remote_label"
-  printf '  Son cote hote: %s\n' "$host_label"
-  printf '  Duree prevue : %ss\n' "$dur"
+  printf '  UA audio     : %s\n' "$remote_label"
+  printf '  Host audio   : %s\n' "$host_label"
+  printf '  Planned dura : %ss\n' "$dur"
 }
 
 # ---------------- ASCII phone + Dashboard -----------
 dashboard_script_body() {
+  # Emit the body of the dashboard helper script executed in a terminal.
   local header
   header=$(printf 'AST_CT=%q\nAST_IP=%q\nLOG_DIR=%q\nHACKER_MODE=%q\nSTOP_FILE=%q\nUAS_DISPLAY=%q\n' \
     "$AST_CT" "$AST_IP" "$LOG_DIR" "$HACKER_MODE" "$STOP_FILE" "${UAS[*]}")
@@ -448,7 +468,7 @@ loop_file="$HOME/.sipdemo_loop_state";  touch "$loop_file"
 while true; do
   clear
   echo -e "\033[1;36m============================================\033[0m"
-  echo -e "\033[1;32m   WELCOME ON DASHBOARD - CENTRALE TELEPHONIQUE\033[0m"
+  echo -e "\033[1;32m   WELCOME TO THE SWITCHBOARD DASHBOARD\033[0m"
   echo -e "\033[1;36m============================================\033[0m"
   echo
   echo -e "\033[1;33m$(phone_icon)\033[0m"
@@ -457,24 +477,24 @@ while true; do
   echo -e "\033[1;32mLogs:\033[0m ${LOG_DIR}"
   echo -e "\033[1;33mHacker mode:\033[0m ${HACKER_MODE}   \033[1;33mStop file:\033[0m ${STOP_FILE}"
   echo
-  echo -e "\033[1;36mCe que nous montrons:\033[0m signalisation, canaux actifs, scenario guide puis rafales controlees."
+  echo -e "\033[1;36mWhat you see:\033[0m signaling, active channels, guided scenario, then controlled bursts."
   echo
 
-  echo -e "\033[1;36m=== Etat scenario ===\033[0m"
+  echo -e "\033[1;36m=== Scenario status ===\033[0m"
   if [[ -s "$step_file" ]]; then
     cat "$step_file"
   else
-    echo "En attente du premier appel..."
+    echo "Waiting for the first call..."
   fi
 
-  echo -e "\n\033[1;36m--- Centrale telephonique ---\033[0m"
+  echo -e "\n\033[1;36m--- PBX snapshot ---\033[0m"
   if ! lxc exec "$AST_CT" -- bash -lc 'asterisk -rx "core show channels concise"' 2>/dev/null; then
-    echo "(commande asterisk indisponible)"
+    echo "(asterisk command unavailable)"
   fi
 
   echo -e "\n\033[1;36m--- SIP peers ---\033[0m"
   if ! lxc exec "$AST_CT" -- bash -lc "asterisk -rx 'sip show peers' | egrep 'Name|^ua'" 2>/dev/null; then
-    echo "(commande sip show peers indisponible)"
+    echo "(sip show peers command unavailable)"
   fi
 
   if [[ -s "$loop_file" ]]; then
@@ -487,8 +507,9 @@ done
 EOS
 }
 
-# ---------------- Orchestration multi terminaux -----
+# ---------------- Multi-terminal orchestration -----
 run_demo_terms() {
+  # Launch dashboards, then walk through the guided scenario and optional bursts.
   local spacing_det="$SOUND_GUIDE_PAUSE"
   local spacing_burst="$SOUND_BURST_PAUSE"
   local host_can_play="no"
@@ -499,12 +520,13 @@ run_demo_terms() {
   open_term "dashboard" "$dashboard_body" "$GEOM_DASH" yes
   sleep 0.4
 
+  # Tail call logs once files start appearing in the log directory.
   logs_body=$(
     {
       printf 'LOG_DIR=%q\n' "$LOG_DIR"
       cat <<'EOS'
 mkdir -p "$LOG_DIR"
-echo "En attente de logs..."
+echo "Waiting for logs..."
 while true; do
   if compgen -G "$LOG_DIR"/*.log > /dev/null 2>&1; then
     tail -F "$LOG_DIR"/*.log
@@ -517,6 +539,7 @@ EOS
   )
   open_term "logs" "$logs_body" "$GEOM_LOGS" yes
 
+  # Continuously refresh the SIP peer list in its own pane.
   peers_body=$(
     {
       printf 'AST_CT=%q\n' "$AST_CT"
@@ -524,7 +547,7 @@ EOS
 while true; do
   clear
   if ! lxc exec "$AST_CT" -- bash -lc "asterisk -rx 'sip show peers' | egrep 'Name|^ua'" 2>/dev/null; then
-    echo "(commande sip show peers indisponible)"
+    echo "(sip show peers command unavailable)"
   fi
   sleep 2
 done
@@ -533,6 +556,7 @@ EOS
   )
   open_term "peers" "$peers_body" "$GEOM_PEER" yes
 
+  # Dedicated interactive console for raw Asterisk commands.
   asterisk_body=$(
     {
       printf 'AST_CT=%q\n' "$AST_CT"
@@ -544,13 +568,14 @@ EOS
   open_term "asterisk" "$asterisk_body" "$GEOM_ASTK" yes
 
   local idx ua geom_var geom ua_body
+  # Spawn a holding terminal for each UA to keep layouts consistent.
   for idx in "${!UAS[@]}"; do
     ua=${UAS[$idx]}
     geom_var="GEOM_UA$((idx+1))"
     geom=${!geom_var:-}
     ua_body=$(
       {
-        printf 'message=%q\n' "$ua pret - en attente des appels automatiques"
+        printf 'message=%q\n' "$ua ready - waiting for automated calls"
         cat <<'EOS'
 echo "$message"
 while true; do sleep 3600; done
@@ -561,15 +586,16 @@ EOS
   done
 
   for s in $(seq "$COUNTDOWN" -1 1); do
-    echo "Demarrage dans $s..."
+    echo "Starting in $s..."
     sleep 1
   done
-  echo "Action !"
+  echo "Action!"
 
   local step_file="$HOME/.sipdemo_current_step"; : > "$step_file"
 
   local total_steps=${#SCENARIO[@]}
   local step_idx=0
+  # Guided scenario: execute each scripted call sequentially.
   for line in "${SCENARIO[@]}"; do
     step_idx=$((step_idx+1))
     set -- $line; ua=${1}; target=${2}
@@ -587,7 +613,7 @@ EOS
       fi
     done
     if (( ua_idx < 0 )); then
-      echo "UA $ua inconnue"
+      echo "Unknown UA $ua"
       continue
     fi
     port="${UA_PORTS[$ua_idx]}"
@@ -635,17 +661,18 @@ EOS
   done
 
   if [[ "$HACKER_MODE" == "on" ]]; then
+    # Optional burst mode to stress the PBX with randomized call storms.
     local loop_file="$HOME/.sipdemo_loop_state"; : > "$loop_file"
-    echo "Hacker mode: $LOOP_COUNT vagues x $CALL_BURST appels" >> "$loop_file"
+    echo "Hacker mode: $LOOP_COUNT waves x $CALL_BURST calls" >> "$loop_file"
     echo "Stop file: $STOP_FILE" >> "$loop_file"
 
     local wave
     for wave in $(seq 1 "$LOOP_COUNT"); do
       if [[ -f "$STOP_FILE" ]]; then
-        echo "STOP demande" > "$loop_file"
+        echo "STOP requested" > "$loop_file"
         break
       fi
-      echo "Vague $wave/$LOOP_COUNT" > "$loop_file"
+      echo "Wave $wave/$LOOP_COUNT" > "$loop_file"
 
       local n
       for n in $(seq 1 "$CALL_BURST"); do
@@ -710,10 +737,10 @@ EOS
       [[ -f "$STOP_FILE" ]] && break
       sleep "$LOOP_SLEEP"
     done
-    echo "Hacker mode termine" >> "$loop_file"
+    echo "Hacker mode complete" >> "$loop_file"
   fi
 
-  echo "Demo terminee. Les fenetres d appel se ferment automatiquement. Dashboard et logs restent ouverts."
+  echo "Demo finished. Call windows close automatically. Dashboard and log panes stay open."
 }
 
 # ---------------- Main ----------------
